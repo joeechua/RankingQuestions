@@ -62,6 +62,7 @@ class Normalize(nn.Module):
 
 
 class ImageEmbedding(nn.Module):
+    #TODO: YOLOv5
     def __init__(self, image_channel_type='I', output_size=1024, mode='train',
                  extract_features=False, features_dir=None):
         super(ImageEmbedding, self).__init__()
@@ -96,6 +97,7 @@ class ImageEmbedding(nn.Module):
 
 
 class QuesEmbedding(nn.Module):
+    #TODO: sBERT
     def __init__(self, input_size=300, hidden_size=512, output_size=1024, num_layers=2, batch_first=True):
         super(QuesEmbedding, self).__init__()
         # TODO: take as parameter
@@ -125,6 +127,101 @@ class QuesEmbedding(nn.Module):
                     [ques_embedding, lstm_embedding[i]], dim=1)
             ques_embedding = self.fflayer(ques_embedding)
         return ques_embedding
+
+class WordEmbedding(nn.Module):
+    #TODO: sBERT
+    def __init__(self, input_size=300, hidden_size=512, output_size=1024, num_layers=2, batch_first=True):
+        super(QuesEmbedding, self).__init__()
+        # TODO: take as parameter
+        self.bidirectional = True
+        if num_layers == 1:
+            self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                                batch_first=batch_first, bidirectional=self.bidirectional)
+
+            if self.bidirectional:
+                self.fflayer = nn.Sequential(
+                    nn.Linear(2 * num_layers * hidden_size, output_size),
+                    nn.Tanh())
+        else:
+            self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                                num_layers=num_layers, batch_first=batch_first)
+            self.fflayer = nn.Sequential(
+                nn.Linear(2 * num_layers * hidden_size, output_size),
+                nn.Tanh())
+
+    def forward(self, ques):
+        _, hx = self.lstm(ques)
+        lstm_embedding = torch.cat([hx[0], hx[1]], dim=2)
+        ques_embedding = lstm_embedding[0]
+        if self.lstm.num_layers > 1 or self.bidirectional:
+            for i in range(1, self.lstm.num_layers):
+                ques_embedding = torch.cat(
+                    [ques_embedding, lstm_embedding[i]], dim=1)
+            ques_embedding = self.fflayer(ques_embedding)
+        return ques_embedding
+
+def norm(input, p=2, dim=1, eps=1e-12):
+    return input / input.norm(p, dim, keepdim=True).clamp(min=eps).expand_as(input)
+
+class RANQ(nn.Module):
+    def __init__(self):
+        super(RANQ, self).__init__()
+        if opts.preModel == 'resNet50':
+
+            resnet = models.resnext101_32x8d(pretrained=True)
+            modules = list(resnet.children())[:-1]  # we do not use the last fc layer.
+            self.visionMLP = nn.Sequential(*modules)
+
+            self.visual_embedding = nn.Sequential(
+                nn.Linear(opts.imfeatDim + 300, opts.embDim),
+                nn.BatchNorm1d(opts.embDim),
+                nn.LeakyReLU(0.02, inplace=True),
+            )
+
+            self.qa_embedding = WordEmbedding()
+
+            self.tfidf_embedding = nn.Sequential(
+                nn.Linear(300, 1024),
+                nn.LeakyReLU(0.02, inplace=True),
+                )
+
+            self.recipe_embedding = nn.Sequential(
+                nn.Linear(1024 + 1024, opts.embDim),
+                nn.BatchNorm1d(opts.embDim),
+                nn.LeakyReLU(0.02, inplace=True),
+            )
+
+        else:
+            raise Exception('Only resNet50 model is implemented.')
+
+        if opts.semantic_reg:
+            self.semantic_branch = nn.Linear(opts.embDim, opts.numClasses)
+
+    def forward(self, image, ques, sentiment, strategy, topic):  # we need to check how the input is going to be provided to the model
+        # recipe embedding
+        tfidf_emb = self.tfidf_embedding(y)  # joining on the last dim
+        recipe_emb = self.table([self.stRNN_(z1, z2), tfidf_emb], 1)
+        recipe_emb = self.recipe_embedding(recipe_emb)
+        recipe_emb = norm(recipe_emb)
+
+        #qa embedding
+        
+
+        # visual embedding
+        x = self.visionMLP(image)
+        visual_emb = self.visual_embedding(x)
+        visual_emb = norm(visual_emb)
+
+        if opts.semantic_reg:
+            visual_sem = self.semantic_branch(visual_emb)
+            recipe_sem = self.semantic_branch(recipe_emb)
+            # final output
+            output = [visual_emb, recipe_emb, visual_sem, recipe_sem]
+        else:
+            # final output
+            output = [visual_emb, recipe_emb]
+
+        return output
 
 
 class VQAModel(nn.Module):
@@ -168,3 +265,6 @@ class VQAModel(nn.Module):
             combined = image_embeddings * ques_embeddings
         output = self.mlp(combined)
         return output
+    
+    def forword(self, images, topics, sentiments, strategies, symbols, qa):
+        pass

@@ -62,12 +62,11 @@ class Normalize(nn.Module):
 
 
 class ImageEmbedding(nn.Module):
-    #TODO: YOLOv5
     def __init__(self, image_channel_type='I', output_size=1024, mode='train',
                  extract_features=False, features_dir=None):
         super(ImageEmbedding, self).__init__()
-        self.extractor = models.vgg16(pretrained=True)
-        # freeze feature extractor (VGGNet) parameters
+        self.extractor = models.resnet50(pretrained=True)
+        # freeze feature extractor (ResNet50) parameters
         for param in self.extractor.parameters():
             param.requires_grad = False
 

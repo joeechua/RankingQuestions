@@ -9,7 +9,61 @@ nltk.download("stopwords")
 from nltk.corpus import stopwords
 stop_words = set(stopwords.words('english'))
 stop_words.add("product")
+import gensim.downloader as api
+from gensim.models import KeyedVectors
+import numpy as np
+import torch
+import os
+import re
+import json
+from textblob import TextBlob
 
+class TextEmbedModel:
+    """
+    Class for the Word2Vec model.
+
+    """
+
+    def __init__(self, embed_model_name="glove-wiki-gigaword-300"):
+        """
+        Initialise a new text embbedding model.
+
+        :param embed_model_name: the name of the word2vec model
+        """
+        self.embed_model_name = embed_model_name
+        path = self.embed_model_name + ".model"
+        if os.path.exists(path):
+            self.model = KeyedVectors.load(path)
+        else:
+            self.model = api.load(self.embed_model_name)
+            self.model.save(path)
+
+        # Embed size specifies the embedding size and is also the hidden size
+        # of the first hidden layer of memory cells.
+        self.embed_size = int(self.embed_model_name.split("-")[-1])
+
+    def get_vector_rep(self, phrase):
+        """
+        Get the vector representation of phrase.
+
+        :param phrase: a phrase (i.e., words separated by a space)
+        :return: the vector representation of phrase based on the word2vec model
+        initialised
+        """
+        phrase = phrase.strip().lower()
+        blob = TextBlob(phrase)
+        words = blob.words
+
+        vec = np.zeros([self.embed_size])
+
+        for word in words:
+            try:
+                vec += self.model.get_vector(word)
+            except KeyError:
+                print("DOES NOT EXIST", word)
+                vec += np.zeros([self.embed_size])
+
+        return vec
 
 class SentenceEmbedModel:
     """

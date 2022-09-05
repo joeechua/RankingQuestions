@@ -2,8 +2,7 @@ import shutil
 import time
 from tensorboardX import SummaryWriter
 import torch
-from torch.autograd import Variable
-from IPython.core.debugger import Pdb
+#from IPython.core.debugger import Pdb
 from scheduler import CustomReduceLROnPlateau
 import json
 
@@ -16,28 +15,31 @@ def train(model, dataloader, criterion, optimizer, use_gpu=False):
     step = 0
     # Pdb().set_trace()
     # Iterate over data.
-    for questions, images, image_ids, answers, ques_ids in dataloader:
-        # print('questions size: ', questions.size())
+    for image, target, answer_id in dataloader:
+        qa = target["qa"]
+        sentiment = target["sentiment"]
+        strategy = target["strategy"]
+        topic = target["topic"]
         if use_gpu:
-            questions, images, image_ids, answers = questions.cuda(), images.cuda(), image_ids.cuda(), answers.cuda()
-        questions, images, answers = Variable(questions).transpose(0, 1), Variable(images), Variable(answers)
+            image, qa, sentiment, strategy, topic, answer_id = image.cuda(), qa.cuda(), sentiment.cuda(), strategy.cuda(), topic.cuda(), answer_id.cuda()
 
         # zero grad
         optimizer.zero_grad()
-        ans_scores = model(images, questions, image_ids)
+        ans_scores = model(image, qa, sentiment, strategy, topic)
         _, preds = torch.max(ans_scores, 1)
-        loss = criterion(ans_scores, answers)
+        loss = criterion(ans_scores, answer_id)
 
         # backward + optimize
         loss.backward()
         optimizer.step()
 
         # statistics
-        running_loss += loss.data[0]
-        running_corrects += torch.sum((preds == answers).data)
-        example_count += answers.size(0)
+        running_loss += loss.item()
+        running_corrects += torch.sum((preds == answer_id).data)
+        #example_count += answers_ids.size(0)
+        example_count += 1
         step += 1
-        if step % 5000 == 0:
+        if step % 100 == 0:
             print('running loss: {}, running_corrects: {}, example_count: {}, acc: {}'.format(
                 running_loss / example_count, running_corrects, example_count, (float(running_corrects) / example_count) * 100))
         # if step * batch_size == 40000:
@@ -55,22 +57,23 @@ def validate(model, dataloader, criterion, use_gpu=False):
     running_corrects = 0
     example_count = 0
     # Iterate over data.
-    for questions, images, image_ids, answers, ques_ids in dataloader:
+    for image, target, answer_id in dataloader:
+        qa = target["qa"]
+        sentiment = target["sentiment"]
+        strategy = target["strategy"]
+        topic = target["topic"]
         if use_gpu:
-            questions, images, image_ids, answers = questions.cuda(
-            ), images.cuda(), image_ids.cuda(), answers.cuda()
-        questions, images, answers = Variable(questions).transpose(
-            0, 1), Variable(images), Variable(answers)
+            image, qa, sentiment, strategy, topic, answer_id = image.cuda(), qa.cuda(), sentiment.cuda(), strategy.cuda(), topic.cuda(), answer_id.cuda()
 
         # zero grad
-        ans_scores = model(images, questions, image_ids)
+        ans_scores = model(image, qa, sentiment, strategy, topic)
         _, preds = torch.max(ans_scores, 1)
-        loss = criterion(ans_scores, answers)
+        loss = criterion(ans_scores, answer_id)
 
         # statistics
-        running_loss += loss.data[0]
-        running_corrects += torch.sum((preds == answers).data)
-        example_count += answers.size(0)
+        running_loss += loss.item()
+        running_corrects += torch.sum((preds == answer_id).data)
+        example_count += 1 # only one new data point
     loss = running_loss / example_count
     # acc = (running_corrects / example_count) * 100
     acc = (running_corrects / len(dataloader.dataset)) * 100
@@ -147,37 +150,38 @@ def train_model(model, data_loaders, criterion, optimizer, scheduler, save_dir, 
 
 
 def save_checkpoint(save_dir, state, is_best):
-    savepath = save_dir + '/' + 'checkpoint.pth.tar'
+    savepath = save_dir + '/' + 'checkpoint_ranq.pth.tar'
     torch.save(state, savepath)
     if is_best:
         shutil.copyfile(savepath, save_dir + '/' + 'model_best.pth.tar')
 
 
-def test_model(model, dataloader, itoa, outputfile, use_gpu=False):
+def test_model(model, dataloader, outputfile, use_gpu=False):
     model.eval()  # Set model to evaluate mode
     example_count = 0
     test_begin = time.time()
     outputs = []
 
     # Iterate over data.
-    for questions, images, image_ids, answers, ques_ids in dataloader:
-
+    for image, target, answer_id in dataloader:
+        qa = target["qa"]
+        sentiment = target["sentiment"]
+        strategy = target["strategy"]
+        topic = target["topic"]
+        image_id = target["image id"]
         if use_gpu:
-            questions, images, image_ids, answers = questions.cuda(
-            ), images.cuda(), image_ids.cuda(), answers.cuda()
-        questions, images, answers = Variable(questions).transpose(
-            0, 1), Variable(images), Variable(answers)
+            image, qa, sentiment, strategy, topic, answer_id = image.cuda(), qa.cuda(), sentiment.cuda(), strategy.cuda(), topic.cuda(), answer_id.cuda()
+
         # zero grad
-        ans_scores = model(images, questions, image_ids)
+        ans_scores = model(image, qa, sentiment, strategy, topic)
         _, preds = torch.max(ans_scores, 1)
 
-        outputs.extend([{'question_id': ques_ids[i], 'answer': itoa[str(
-            preds.data[i])]} for i in range(ques_ids.size(0))])
+        outputs.extend([{'image_id': image_id, 'answer': preds}])
 
         if example_count % 100 == 0:
             print('(Example Count: {})'.format(example_count))
         # statistics
-        example_count += answers.size(0)
+        example_count += 1
 
     json.dump(outputs, open(outputfile, 'w'))
     print('(Example Count: {})'.format(example_count))

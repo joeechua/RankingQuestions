@@ -1,58 +1,73 @@
 import os
 import pickle
 import torch
-import torchvision.transforms as transforms
 from PIL import Image
-from IPython.core.debugger import Pdb
 import numpy as np
-
+import json
+import random
+from preprocess.descriptors import SentenceEmbedModel
 
 class VQADataset(torch.utils.data.Dataset):
-    ques_vocab = {}
-    ans_vocab = {}
 
-    def __init__(self, data_dir, qafile, img_dir, phase, img_scale=(256, 256), img_crop=224, raw_images=False):
-        self.data_dir = data_dir
-        self.examples = pickle.load(open(os.path.join(data_dir, qafile), 'rb'))
-        #Pdb().set_trace()
-        if phase == 'train':
-            self.load_vocab(data_dir)
-        self.transforms = transforms.Compose([
-            transforms.Scale(img_scale),
-            transforms.CenterCrop(img_crop),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225])])
-        self.img_dir = img_dir
-        self.phase = phase
-        self.raw_images = raw_images    # if true, images and load images, not embeddings
-
-    def load_vocab(self, data_dir):
-        ques_vocab_file = os.path.join(data_dir, 'ques_stoi.tsv')
-        for line in open(ques_vocab_file):
-            parts = line.split('\t')
-            tok, idx = parts[0], int(parts[1].strip())
-            VQADataset.ques_vocab[idx] = tok
-        # NOTE: in version 0.1.1 of torchtext, index 0 is assigned to '<unk>' the first time a unknown token is encountered.
-        VQADataset.ques_vocab[0] = '<unk>'
-        ans_vocab_file = os.path.join(data_dir, 'ans_itos.tsv')
-        for line in open(ans_vocab_file):
-            parts = line.split('\t')
-            VQADataset.ans_vocab[parts[0]] = parts[1]
-
-    def __len__(self):
-        return len(self.examples)
+    def __init__(self, root="data", transforms = None):
+        self.root = root
+        self.transforms = transforms
+        self._load()
+        self.text_embed_model = SentenceEmbedModel()
 
     def __getitem__(self, idx):
-        ques_id, ques, _, imgid, ans = self.examples[idx]
-        if self.raw_images:
-            img = Image.open('{0}/{1}/COCO_{1}_{2:012d}.jpg'.format(self.data_dir, self.img_dir, imgid))
-            img = img.convert('RGB')
-            img = self.transforms(img)
-        else:
-            img = torch.load('{}/{}/{}'.format(self.data_dir, self.img_dir, imgid))
-        return torch.from_numpy(ques), img, imgid, ans, ques_id
+        descriptors = self.combos[idx]
+        key = descriptors["Image"]
+        slogan = self.text_embed_model.get_vector_rep(descriptors["Slogan"])
+        slogan_id = self.text_embed_model.get_vector_rep(descriptors["Slogan id"])
+        sentiment = self.text_embed_model.get_vector_rep(descriptors["Sentiment"])
+        strategy = self.text_embed_model.get_vector_rep(descriptors["Strategy"])
+        topic = self.text_embed_model.get_vector_rep(descriptors["Topic"])
+        qa =self.text_embed_model.get_vector_rep(descriptors["QA"])
+
+        filename = os.path.join(self.root, "{}".format(key))
+        image = Image.open(filename, mode='r').convert('RGB')
+        image = image.resize((501, 501))
+
+        answer = descriptors["Slogan id"]
+
+        # create target
+        target = {}
+        target["qa"] = qa
+        target["sentiment"] = sentiment
+        target["strategy"] = strategy
+        target["slogan"] = slogan
+        target["topic"] = topic
+        target["image id"] = key
+        # transforms image and target
+        if self.transforms is not None:
+            image, target = self.transforms(image, target)
+
+        answer = torch.Tensor([slogan_id])
+        
+        return image, target, answer
+    
+    
+    def __len__(self) -> int:
+        """Return the size of the dataset
+
+        Returns:
+            int: number of images in the dataset
+        """
+        return len(self.info_path)
+
+    def _load(self) -> None:
+        """Load the annotation resources
+
+        Args:
+            descriptor (str): selected descriptor from one of the annotations
+        """
+        # Load the field's data
+        filename = "data/annotations/slogan_descriptor_combos.json"
+        with open(filename, "r") as f:
+            self.combos = json.load(f)
+            self.info_path = list(self.combos.keys())
+        
 
 
 class RandomSampler:

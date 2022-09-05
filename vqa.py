@@ -4,7 +4,9 @@ import torch.nn as nn
 import torchvision.models as models
 #import utils
 import torch.nn.functional as F
-from preprocessors.descriptors import SentenceEmbedModel
+from preprocess.descriptors import SentenceEmbedModel
+import numpy as np
+
 
 from IPython.core.debugger import Pdb
 
@@ -23,7 +25,7 @@ class MutanFusion(nn.Module):
 
             hv.append(nn.Sequential(do, lin, nn.Tanh()))
         #
-        self.image_transformation_layers = nn.ModuleList(hv)
+        self.image_transformation_layers = nn.ModuleList(hv).double()
         #
         hq = []
         for i in range(self.num_layers):
@@ -31,7 +33,7 @@ class MutanFusion(nn.Module):
             lin = nn.Linear(input_dim, out_dim)
             hq.append(nn.Sequential(do, lin, nn.Tanh()))
         #
-        self.ques_transformation_layers = nn.ModuleList(hq)
+        self.ques_transformation_layers = nn.ModuleList(hq).double()
 
     def forward(self, ques_emb, img_emb):
         # Pdb().set_trace()
@@ -147,21 +149,16 @@ class QaEmbedding(nn.Module):
         ques_embedding = torch.cat([qa, sent, strat, top])
         return ques_embedding
 
-class RANQ(nn.Module):
+class RANQ():
     def __init__(self):
         super(RANQ, self).__init__()
         self.image_embedding = ImageEmbedding()
-        self.word_embeddings = SentenceEmbedModel()
-        self.qa_plus = QaEmbedding()
+        self.qa_plus = QaEmbedding().double()
 
 
     def forward(self, image, ques, sentiment, strategy, topic):
         # descriptor embeddings
-        question = self.word_embeddings(ques)
-        sent = self.word_embeddings(sentiment)
-        strat = self.word_embeddings(strategy)
-        top = self.word_embeddings(topic)
-        desc_emb = self.qa_plus(question, sent, strat, top)
+        desc_emb = self.qa_plus(ques, sentiment, strategy, topic)
 
         # image embedding
         img_emb = self.image_embedding(image)
@@ -173,7 +170,6 @@ class RANQ(nn.Module):
 
 class VQAModel(nn.Module):
 
-    #def __init__(self, vocab_size=10000, word_emb_size=300, emb_size=1024, output_size=1000, image_channel_type='I', ques_channel_type='lstm', use_mutan=True, mode='train', extract_img_features=True, features_dir=None):
     def __init__(self, word_emb_size=300, emb_size=1024, output_size=1000,  use_mutan=True, mode='train'):    
         super(VQAModel, self).__init__()
         self.mode = mode
@@ -181,30 +177,20 @@ class VQAModel(nn.Module):
         self.embedding = RANQ()
         
         if use_mutan:
-            self.mutan = MutanFusion(emb_size, emb_size, 5)
-            self.mlp = nn.Sequential(nn.Linear(emb_size, output_size))
+            self.mutan = MutanFusion(emb_size, emb_size, 5).double()
+            self.mlp = nn.Sequential(nn.Linear(emb_size, output_size)).double()
         else:
             self.mlp = nn.Sequential(
                 nn.Linear(emb_size, 1000),
                 nn.Dropout(p=0.5),
                 nn.Tanh(),
                 nn.Linear(1000, output_size))
-
-    #ORIGINAL
-    # def forward(self, images, questions, image_ids):
-    #     image_embeddings = self.image_channel(images, image_ids)
-    #     embeds = self.word_embeddings(questions)
-    #     ques_embeddings = self.ques_channel(embeds)
-    #     if hasattr(self, 'mutan'):
-    #         combined = self.mutan(ques_embeddings, image_embeddings)
-    #     else:
-    #         combined = image_embeddings * ques_embeddings
-    #     output = self.mlp(combined)
-    #     return output
     
     def forward(self, image, question, sentiment, strategy, topic):
-        image_embedding, desc_embedding = self.embedding(image, question, sentiment, strategy, topic)
+        image_embedding, desc_embedding = self.embedding.forward(image, question, sentiment, strategy, topic)
         if hasattr(self, 'mutan'):
+            desc_embedding = desc_embedding.type(torch.DoubleTensor)
+            image_embedding = image_embedding.type(torch.DoubleTensor)
             combined = self.mutan(desc_embedding, image_embedding)
         else:
             combined = image_embedding * desc_embedding

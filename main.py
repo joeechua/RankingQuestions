@@ -1,136 +1,130 @@
-import os
-import argparse
-import yaml
+import pickle
 import torch
+import torchvision
+from sklearn.model_selection import train_test_split
+from dataset import VQADataset
+#from preprocess.boxes import write_dict_to_json
+from tools.evaluate import evaluate
+from tools.engine import train_one_epoch
+from tools.evaluate import evaluate
+import tools.transforms as T
+import tools.utils as utils
+from vqa import VQAModel
+from train import test_model, train_model, validate
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import lr_scheduler
-from torch.utils.data import DataLoader
-from IPython.core.debugger import Pdb
-
-from preprocess import preprocess
-from dataset import VQADataset, VQABatchSampler
-from train import train_model, test_model
-# from vqa_mutan_bilstm import VQAModel as VQAModel
-from vqa import VQAModel
-from san import SANModel
-from scheduler import CustomReduceLROnPlateau
-
-parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config', type=str, default='config.yml')
 
 
-def load_datasets(config, phases):
-    config = config['data']
-    if 'preprocess' in config and config['preprocess']:
-        print('Preprocessing datasets')
-        preprocess(
-            data_dir=config['dir'],
-            train_ques_file=config['train']['ques'],
-            train_ans_file=config['train']['ans'],
-            val_ques_file=config['val']['ques'],
-            val_ans_file=config['val']['ans'])
+def get_transform(train: bool):
+    """Return the transform function
 
-    print('Loading preprocessed datasets')
-    datafiles = {x: '{}.pkl'.format(x) for x in phases}
-    raw_images = 'preprocess' in config['images'] and config['images']['preprocess']
-    if raw_images:
-        img_dir = {x: config[x]['img_dir'] for x in phases}
+    Args:
+        train (bool): whether the transform is applied on training dataset
+
+    Returns:
+        func: transform function on image and target
+    """
+    transforms = []
+    # converts the image, a PIL image, into a PyTorch Tensor
+    transforms.append(T.ToTensor())
+    if train:
+        # during training, randomly flip the training images
+        # and ground-truth for data augmentation
+        transforms.append(T.RandomHorizontalFlip(0.5))
+    return T.Compose(transforms)
+
+
+def create_train_test_val_dataset(dataset: VQADataset):
+    """Split the dataset into training and testing
+
+    Args:
+        dataset (AdsDataset): a Pytorch Dataset
+
+    Returns:
+        (AdsDataset, AdsDataset): train dataset, test dataset
+    """
+    # randomly select the training and testing indices
+    indices = list(range(len(dataset)))
+    train_indices, vt_indices = train_test_split(
+        indices, train_size=0.70, shuffle=True, random_state=24)
+    val_indices, test_indices = train_test_split(
+        vt_indices, train_size=0.75, shuffle=True, random_state=24)
+
+    # split the dataset into train and test
+    train_dataset = torch.utils.data.Subset(VQADataset(transforms=get_transform(train=True)), train_indices)
+    val_dataset = torch.utils.data.Subset(VQADataset(transforms=get_transform(train=False)), val_indices)
+    test_dataset = torch.utils.data.Subset(VQADataset(transforms=get_transform(train=False)), test_indices)
+
+    return train_dataset, val_dataset, test_dataset
+
+
+def train(num_epochs: int, checkpoint=None, batch_size=8, num_workers=1):
+    """Train the model
+
+    Args:
+        num_classes (int): number of label classes
+        num_epochs (int): number of epochs to train the model
+        checkpoint (str, optional): path to the checkpoint file. Defaults to None.
+        batch_size (int, optional): batch size. Defaults to 8.
+        num_workers (int, optional): number of workers. Defaults to 1.
+    """
+    # create dataset
+    vqa_dataset = VQADataset()
+    # create training & testing dataset
+    train_dataset, val_dataset, test_dataset = create_train_test_val_dataset(vqa_dataset)
+
+    # define training data loaders
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, collate_fn=utils.collate_fn)
+
+    # define testing data loaders
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=1, shuffle=False, num_workers=num_workers,
+        collate_fn=utils.collate_fn)
+    
+    # define testing data loaders
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=1, shuffle=False, num_workers=num_workers,
+        collate_fn=utils.collate_fn)
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    # Initialize model or load checkpoint
+    if checkpoint is None:
+        start_epoch = 0
+        # load a model pre-trained on COCO
+        model = VQAModel()
+        # construct an optimizer
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = optim.SGD(params, lr=0.005,
+                                    momentum=0.9, weight_decay=0.0005)
+
     else:
-        img_dir = {x: config[x]['emb_dir'] for x in phases}
-    datasets = {x: VQADataset(data_dir=config['dir'], qafile=datafiles[x], img_dir=img_dir[x], phase=x,
-                              img_scale=config['images']['scale'], img_crop=config['images']['crop'], raw_images=raw_images) for x in phases}
-    batch_samplers = {x: VQABatchSampler(
-        datasets[x], config[x]['batch_size']) for x in phases}
+        checkpoint = torch.load(checkpoint)
+        start_epoch = checkpoint['epoch'] + 1
+        print('\nLoaded checkpoint from epoch %d.\n' % start_epoch)
+        model = checkpoint['model']
+        optimizer = checkpoint['optimizer']
 
-    dataloaders = {x: DataLoader(
-        datasets[x], batch_sampler=batch_samplers[x], num_workers=config['loader']['workers']) for x in phases}
-    dataset_sizes = {x: len(datasets[x]) for x in phases}
-    print(dataset_sizes)
-    print("ques vocab size: {}".format(len(VQADataset.ques_vocab)))
-    print("ans vocab size: {}".format(len(VQADataset.ans_vocab)))
-    return dataloaders, VQADataset.ques_vocab, VQADataset.ans_vocab
+    # move model to the right device
+    model.to(device)
 
+    # construct a learning rate scheduler which decreases the learning rate by
+    # 10x every 3 epochs
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
+                                                step_size=3,
+                                                gamma=0.1)
 
-def main(config):
-    if config['mode'] == 'test':
-        phases = ['train', 'test']
-    else:
-        phases = ['train', 'val']
-    dataloaders, ques_vocab, ans_vocab = load_datasets(config, phases)
-
-    # add model parameters to config
-    config['model']['params']['vocab_size'] = len(ques_vocab)
-    config['model']['params']['output_size'] = len(ans_vocab) - 1   # -1 as don't want model to predict '<unk>'
-    config['model']['params']['exatract_img_features'] = 'preprocess' in config['data']['images'] and config['data']['images']['preprocess']
-    # which features dir? test, train or validate?
-    config['model']['params']['features_dir'] = os.path.join(
-        config['data']['dir'], config['data']['test']['emb_dir'])
-    if config['model']['type'] == 'vqa':
-        model = VQAModel(mode=config['mode'], **config['model']['params'])
-    elif config['model']['type'] == 'san':
-        model = SANModel(mode=config['mode'], **config['model']['params'])
-    print(model)
     criterion = nn.CrossEntropyLoss()
+    dataloaders = {"train": train_dataloader, "val":val_dataloader}
 
-    if config['optim']['class'] == 'sgd':
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()),
-                              **config['optim']['params'])
-    elif config['optim']['class'] == 'rmsprop':
-        optimizer = optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()),
-                                  **config['optim']['params'])
-    else:
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
-                               **config['optim']['params'])
-
-        best_acc = 0
-    # Pdb().set_trace()
-    startEpoch = 0
-    if 'reload' in config['model']:
-        pathForTrainedModel = os.path.join(config['save_dir'],
-                                           config['model']['reload'])
-        if os.path.exists(pathForTrainedModel):
-            print(
-                "=> loading checkpoint/model found at '{0}'".format(pathForTrainedModel))
-            checkpoint = torch.load(pathForTrainedModel)
-            startEpoch = checkpoint['epoch']
-            model.load_state_dict(checkpoint['state_dict'])
-            # optimizer.load_state_dict(checkpoint['optimizer'])
-    if config['use_gpu']:
-        model = model.cuda()
-
-    print('config mode ', config['mode'])
-    save_dir = os.path.join(os.getcwd(), config['save_dir'])
-
-    if config['mode'] == 'train':
-        if 'scheduler' in config['optim'] and config['optim']['scheduler'].lower() == 'CustomReduceLROnPlateau'.lower():
-            print('CustomReduceLROnPlateau')
-            exp_lr_scheduler = CustomReduceLROnPlateau(
-                optimizer, config['optim']['scheduler_params']['maxPatienceToStopTraining'], config['optim']['scheduler_params']['base_class_params'])
-        else:
-            # Decay LR by a factor of gamma every step_size epochs
-            print('lr_scheduler.StepLR')
-            exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-
-        print("begin training")
-        model = train_model(model, dataloaders, criterion, optimizer, exp_lr_scheduler, save_dir,
-                            num_epochs=config['optim']['n_epochs'], use_gpu=config['use_gpu'], best_accuracy=best_acc, start_epoch=startEpoch)
-    elif config['mode'] == 'test':
-        outputfile = os.path.join(save_dir, config['mode'] + ".json")
-        test_model(model, dataloaders['test'], VQADataset.ans_vocab,
-                   outputfile, use_gpu=config['use_gpu'])
-    else:
-        print("Invalid config mode %s !!" % config['mode'])
+    model = train_model(model, dataloaders, criterion, optimizer, lr_scheduler, "results",
+                            num_epochs=num_epochs, use_gpu=True)
+    
+    test_model(model, test_dataloader,"results/test.json", True)
 
 
-if __name__ == '__main__':
-    global args
-    args = parser.parse_args()
-    args.config = os.path.join(os.getcwd(), args.config)
-    config = yaml.load(open(args.config))
-    config['use_gpu'] = config['use_gpu'] and torch.cuda.is_available()
-
-    # TODO: seeding still not perfect
-    torch.manual_seed(config['seed'])
-    torch.cuda.manual_seed(config['seed'])
-    main(config)
+if __name__ == "__main__":
+    train(num_epochs=4)
